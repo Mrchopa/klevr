@@ -21,6 +21,13 @@ type ResponseWrapper struct {
 	StatusCode int
 }
 
+// BodyToString return body as string
+func (r *Request) BodyToString() string {
+	body := make([]byte, r.ContentLength)
+	r.Body.Read(body)
+	return string(body)
+}
+
 // Param return string param
 func (r *Request) Param(name string) string {
 	return strings.Join(r.URL.Query()[name], "")
@@ -64,5 +71,5 @@ func WriteHTTPError(statusCode int, w http.ResponseWriter, err error, message st
 	w.WriteHeader(statusCode)
 	fmt.Fprintf(w, "%s : %v", message, err)
 
-	logger.Warningf("%s : %v", message, err)
+	logger.Warningf("%s : %+v", message, err)
 }

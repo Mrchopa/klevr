@@ -1,7 +1,6 @@
 package manager
 
 import (
-	"errors"
 	"fmt"
 	"net/http"
 	"reflect"
@@ -13,53 +12,60 @@ import (
 
 	"github.com/Klevry/klevr/pkg/common"
 	"github.com/NexClipper/logger"
-	"xorm.io/xorm"
 )
 
 // CommonWrappingHandler common handler for processing standard
-func (api *API) CommonWrappingHandler(DB *xorm.Engine) mux.MiddlewareFunc {
+func CommonWrappingHandler(ctx *common.Context) mux.MiddlewareFunc {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			var session *xorm.Session
+			var tx *Tx
 
 			// 복잡한 flow 정리를 위해 try-catch-finally 블럭 사용
 			common.Block{
 				Try: func() {
 					// response wrapping
-					nw := common.ResponseWrapper{w, http.StatusOK}
+					nw := common.ResponseWrapper{
+						ResponseWriter: w,
+						StatusCode:     http.StatusOK,
+					}
 
 					w.Header().Set("Content-Type", "json/application; charset=utf-8")
 					w.Header().Set("X-Content-Type-Options", "nosniff")
 
 					// DB session 시작
-					session = DB.NewSession()
-
-					err := session.Begin()
+					tx = &Tx{CtxGetDbConn(ctx).NewSession()}
+					err := tx.Begin()
 					if err != nil {
 						logger.Errorf("DB session begin error : %v", err)
 						common.Throw(err)
 					}
 
+					// request context 생성
+					rCtx := common.FromContext(ctx)
+
 					// Request context에 DB session 설정
-					context.Set(r, DBConnContextName, session)
+					rCtx.Put(CtxDbSession, tx)
+
+					// request에 context 추가
+					context.Set(r, CtxRequestContext, rCtx)
 
 					// 다음 핸들러로 진행
 					next.ServeHTTP(&nw, r)
 
 					// 트랜잭션 commit
-					err = session.Commit()
+					err = tx.Commit()
 					if err != nil {
 						logger.Warningf("commit failed : %v", err)
 						common.Throw(err)
 					}
 				},
-				Catch: func(e common.Exception) {
+				Catch: func(e error) {
 					// 트랜잭션 recover 정의
-					if !session.IsClosed() {
-						session.Rollback()
+					if !tx.IsClosed() {
+						tx.Rollback()
 					}
 
-					common.WriteHTTPError(500, w, errors.New(fmt.Sprintf("%+v", e)), "Service is unavailable")
+					common.WriteHTTPError(500, w, fmt.Errorf("%+v", e), "Service is unavailable")
 				},
 				Finally: func() {
 					// Context 초기화
@@ -69,8 +75,8 @@ func (api *API) CommonWrappingHandler(DB *xorm.Engine) mux.MiddlewareFunc {
 
 					// 세션 close
 					defer func() {
-						if !session.IsClosed() {
-							session.Close()
+						if !tx.IsClosed() {
+							tx.Close()
 						}
 					}()
 				},
@@ -79,8 +85,8 @@ func (api *API) CommonWrappingHandler(DB *xorm.Engine) mux.MiddlewareFunc {
 	}
 }
 
-// ExecutionInfoLoggerHandler request processing information logging handler
-func ExecutionInfoLoggerHandler(next http.Handler) http.Handler {
+// RequestInfoLoggerHandler request processing information logging handler
+func RequestInfoLoggerHandler(next http.Handler) http.Handler {
 	var formatter = func(param common.LogFormatterParams) string {
 		var statusColor, methodColor, resetColor string
 		if param.IsOutputColor() {

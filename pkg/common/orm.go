@@ -5,6 +5,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/NexClipper/logger"
+
+	"xorm.io/xorm/log"
+
 	"xorm.io/xorm/names"
 
 	_ "github.com/go-sql-driver/mysql" //justifying
@@ -22,13 +26,24 @@ type DBInfo struct {
 	MaxOpenConns    int
 	MaxIdleConns    int
 	MaxConnLifeTime int
+	InitScriptPath  string
+	ShowSql         bool
+	LogLevel        string
+}
+
+type DB struct {
+	*xorm.Engine
+}
+
+type Session struct {
+	*xorm.Session
 }
 
 // Connect connect to Database and return DB
-func (info *DBInfo) Connect() (*xorm.Engine, error) {
+func (info *DBInfo) Connect() (*DB, error) {
 	db, err := xorm.NewEngine(info.Type, info.URL)
 	if err != nil {
-		return db, err
+		return &DB{db}, err
 	}
 
 	db.SetMaxOpenConns(info.MaxOpenConns)
@@ -37,15 +52,34 @@ func (info *DBInfo) Connect() (*xorm.Engine, error) {
 
 	db.SetTableMapper(CustomTableNameMapper{})
 
-	return db, err
+	db.ShowSQL(info.ShowSql)
+
+	switch strings.ToLower(info.LogLevel) {
+	case "debug":
+		db.SetLogLevel(log.LOG_DEBUG)
+	case "info":
+		db.SetLogLevel(log.LOG_INFO)
+	case "warn":
+		db.SetLogLevel(log.LOG_WARNING)
+	case "error":
+		db.SetLogLevel(log.LOG_ERR)
+	default:
+		db.SetLogLevel(log.LOG_OFF)
+	}
+
+	logger.Infof("DB log lever : [%s]", info.LogLevel)
+	logger.Infof("DB show sql : [%v]", info.ShowSql)
+
+	return &DB{db}, err
 }
 
-func init() {
-	// // 기본 테이블명 설정 변경
-	// // https://gorm.io/docs/conventions.html#Change-default-tablenames
-	// gorm.DefaultTableNameHandler = func(db *gorm.DB, defaultTableName string) string {
-	// 	return strings.ToUpper(defaultTableName)
-	// }
+// NewSession New a session
+func (db *DB) NewSession() *Session {
+	return &Session{db.Engine.NewSession()}
+}
+
+func (tx *Session) Begin() error {
+	return tx.Session.Begin()
 }
 
 type CustomTableNameMapper struct {

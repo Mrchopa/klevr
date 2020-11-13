@@ -6,12 +6,13 @@ import (
 	"runtime/debug"
 	"strings"
 
-	"github.com/gorilla/context"
+	"github.com/Klevry/klevr/pkg/common"
+	_ "github.com/Klevry/klevr/pkg/manager/docs"
+	swagger "github.com/swaggo/http-swagger"
 
 	"github.com/NexClipper/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/mux"
-	"xorm.io/xorm"
 )
 
 // APIURLPrefix default API URL prefix
@@ -38,13 +39,14 @@ type Routes struct {
 	Legacy  *mux.Router
 	Agent   *mux.Router
 	Install *mux.Router
+	Inner   *mux.Router
 }
 
 // API api struct
 type API struct {
 	BaseRoutes *Routes
-	DB         *xorm.Engine
-	InstanceID string
+	DB         *common.DB
+	Manager    *KlevrManager
 }
 
 type apiDef struct {
@@ -53,36 +55,70 @@ type apiDef struct {
 	function func(*gin.Context)
 }
 
+// ReceiveHandshake godoc
+// @Summary 에이전트의 handshake 요청을 받아 처리한다.
+// @Description 에이전트 프로세스가 기동시 최초 한번 handshake를 요청하여 에이전트 정보 등록 및 에이전트 실행에 필요한 실행 정보를 반환한다.
+// @Tags temp
+// @Accept json
+// @Produce json
+// @Router /temp [get]
+func temp2(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(200)
+	fmt.Fprintf(w, "%s", "OK")
+}
+
 // Init initialize API router
-func Init(instance *KlevrManager, db *xorm.Engine, baseRouter *mux.Router) *API {
+// @title Klevr-Manager API
+// @version 1.0
+// @description
+// @contact.name mrchopa
+// @contact.email ys3gods@gmail.com
+// @BasePath /
+func Init(ctx *common.Context) *API {
 	logger.Debug("API Init")
 
 	api := &API{
 		BaseRoutes: &Routes{},
-		DB:         db,
-		InstanceID: instance.InstanceID,
+		DB:         CtxGetDbConn(ctx),
+		Manager:    CtxGetServer(ctx),
 	}
 
 	api.DB.ShowSQL(true)
 	// TODO: ContextLogger interface 구현하여 logger override
 	// api.DB.SetLogger(log.NewSimpleLogger(f))
 
-	baseRouter.Use(api.CommonWrappingHandler(api.DB))
-	baseRouter.Use(ExecutionInfoLoggerHandler)
-	// baseRouter.Use(TestHandler)
+	api.BaseRoutes.Root = api.Manager.RootRouter
 
-	api.BaseRoutes.Root = baseRouter
-	api.BaseRoutes.APIRoot = baseRouter.PathPrefix(APIURLPrefix).Subrouter()
+	// swagger 설정
+	api.BaseRoutes.Root.PathPrefix("/swagger").Handler(swagger.WrapHandler)
+	api.BaseRoutes.Root.PathPrefix("/test").Subrouter().HandleFunc("/test", temp2)
+
+	api.BaseRoutes.APIRoot = api.BaseRoutes.Root
 
 	api.BaseRoutes.Legacy = api.BaseRoutes.APIRoot
-	api.BaseRoutes.Agent = api.BaseRoutes.APIRoot.PathPrefix("/agents").Subrouter()
-	api.BaseRoutes.Install = api.BaseRoutes.APIRoot.PathPrefix("/install").Subrouter()
 
-	api.InitLegacy(api.BaseRoutes.Legacy)
+	api.BaseRoutes.Agent = api.BaseRoutes.APIRoot.PathPrefix("/agents").Subrouter()
+	api.BaseRoutes.Agent.Use(CommonWrappingHandler(ctx))
+	api.BaseRoutes.Agent.Use(RequestInfoLoggerHandler)
+	api.BaseRoutes.Install = api.BaseRoutes.APIRoot.PathPrefix("/install").Subrouter()
+	api.BaseRoutes.Install.Use(CommonWrappingHandler(ctx))
+	api.BaseRoutes.Install.Use(RequestInfoLoggerHandler)
+	api.BaseRoutes.Inner = api.BaseRoutes.APIRoot.PathPrefix("/inner").Subrouter()
+	api.BaseRoutes.Inner.Use(CommonWrappingHandler(ctx))
+	api.BaseRoutes.Inner.Use(RequestInfoLoggerHandler)
+
+	// api.InitLegacy(api.BaseRoutes.Legacy)
 	api.InitAgent(api.BaseRoutes.Agent)
 	api.InitInstall(api.BaseRoutes.Install)
+	api.InitInner(api.BaseRoutes.Inner)
 
-	err := baseRouter.Walk(func(route *mux.Route, router *mux.Router, ancestors []*mux.Route) error {
+	// health check handler(~/health)
+	api.BaseRoutes.Root.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+	})
+
+	err := api.BaseRoutes.Root.Walk(func(route *mux.Route, router *mux.Router, ancestors []*mux.Route) error {
 
 		pathTemplate, _ := route.GetPathTemplate()
 		// if err == nil {
@@ -152,18 +188,12 @@ func registURIWithQuery(r *mux.Router, method int, uri string, f func(http.Respo
 }
 
 // GetDBConn return DB connection(session) from Request context
-func GetDBConn(r *http.Request) *xorm.Session {
-	v := context.Get(r, DBConnContextName)
-	if v == nil {
+func GetDBConn(ctx *common.Context) *Tx {
+	tx := CtxGetDbSession(ctx)
+	if tx == nil {
 		logger.Warningf("The variable in context is not DB session : %d", debug.Stack())
-		panic("DB is not exist")
+		panic("DB session is not exist")
 	}
 
-	db, ok := v.(*xorm.Session)
-	if !ok {
-		logger.Warningf("DB session not exist : %d", debug.Stack())
-		panic("DB is not exist")
-	}
-
-	return db
+	return tx
 }
